@@ -1,0 +1,431 @@
+#!/usr/bin/env bash
+# Build script for Blockdaemon DeFi API TypeScript SDK
+# Generates a TypeScript SDK from OpenAPI specification and prepares it for npm publishing
+#
+
+set -euo pipefail
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+readonly OPENAPI_FILE="swagger/openapi.yml"
+readonly OPENAPI_GENERATOR_IMAGE="openapitools/openapi-generator-cli"
+readonly PACKAGE_NAME="@blockdaemon/defi-api-sdk"
+readonly OUTPUT_DIR_NAME="dist"
+readonly OUTPUT_DIR_PATH="${PWD}/${OUTPUT_DIR_NAME}"
+readonly LICENSE_SOURCE="${PWD}/openAPI/LICENSE"
+readonly README_SOURCE="${PWD}/openAPI/README.md"
+
+readonly KEYWORDS=("blockdaemon" "defi" "sdk" "typescript" "client" "web3" "blockchain" "expand")
+readonly PACKAGE_FILES=("dist" "README.md" "package.json" "LICENSE")
+
+readonly NODE_VERSION_MIN=">=14.0.0"
+readonly NPM_VERSION_MIN=">=6.0.0"
+
+readonly REPOSITORY_URL="git+https://gitlab.com/Blockdaemon/research-development/interoperability/defi-rules-engine"
+
+# =============================================================================
+# Color Output (with fallback for non-TTY environments)
+# =============================================================================
+
+setup_colors() {
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        readonly RED='\033[0;31m'
+        readonly GREEN='\033[0;32m'
+        readonly YELLOW='\033[0;33m'
+        readonly BLUE='\033[0;34m'
+        readonly CYAN='\033[0;36m'
+        readonly BOLD='\033[1m'
+        readonly RESET='\033[0m'
+    else
+        readonly RED=''
+        readonly GREEN=''
+        readonly YELLOW=''
+        readonly BLUE=''
+        readonly CYAN=''
+        readonly BOLD=''
+        readonly RESET=''
+    fi
+}
+
+# =============================================================================
+# Logging Functions
+# =============================================================================
+
+log_info() {
+    echo -e "${BLUE}[INFO]${RESET} $*"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${RESET} $*"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${RESET} $*" >&2
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${RESET} $*" >&2
+}
+
+log_step() {
+    echo -e "${CYAN}${BOLD}==>${RESET} ${BOLD}$*${RESET}"
+}
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+is_macos() {
+    [[ "$(uname -s)" == "Darwin" ]]
+}
+
+check_dependencies() {
+    local missing_deps=()
+
+    if ! command -v docker &>/dev/null; then
+        missing_deps+=("docker")
+    fi
+
+    if ! command -v npm &>/dev/null; then
+        missing_deps+=("npm")
+    fi
+
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        log_error "Missing required dependencies: ${missing_deps[*]}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓${RESET} Dependencies verified (docker, npm)"
+}
+
+validate_environment() {
+    if [[ -z "${VERSION:-}" ]]; then
+        log_error "VERSION environment variable is not set"
+        log_info "Usage: VERSION=x.x.x $0"
+        exit 1
+    fi
+
+    if [[ ! -f "${OPENAPI_FILE}" ]]; then
+        log_error "OpenAPI specification file not found: ${OPENAPI_FILE}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓${RESET} Environment validated (VERSION=${VERSION})"
+}
+
+# Cross-platform sed in-place editing
+sed_inplace() {
+    local pattern="$1"
+    local file="$2"
+
+    if is_macos; then
+        sed -i '' "$pattern" "$file"
+    else
+        sed -i "$pattern" "$file"
+    fi
+}
+
+# =============================================================================
+# Progress Spinner
+# =============================================================================
+
+SPINNER_PID=""
+SPINNER_FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+
+# Start a background spinner with a message
+start_spinner() {
+    local message="$1"
+
+    # Only show spinner in TTY
+    if [[ ! -t 1 ]]; then
+        echo -e "${BLUE}[...]${RESET} ${message}"
+        return
+    fi
+
+    (
+        local i=0
+        while true; do
+            printf "\r${CYAN}${SPINNER_FRAMES[$i]}${RESET} %s" "$message"
+            i=$(( (i + 1) % ${#SPINNER_FRAMES[@]} ))
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+    disown
+}
+
+# Stop the spinner and show completion status
+stop_spinner() {
+    local status="${1:-0}"
+    local message="${2:-}"
+
+    if [[ -n "${SPINNER_PID}" ]] && kill -0 "${SPINNER_PID}" 2>/dev/null; then
+        kill "${SPINNER_PID}" 2>/dev/null
+        wait "${SPINNER_PID}" 2>/dev/null || true
+    fi
+    SPINNER_PID=""
+
+    # Clear the spinner line
+    if [[ -t 1 ]]; then
+        printf "\r\033[K"
+    fi
+
+    # Show result
+    if [[ -n "$message" ]]; then
+        if [[ "$status" -eq 0 ]]; then
+            echo -e "${GREEN}✓${RESET} ${message}"
+        else
+            echo -e "${RED}✗${RESET} ${message}"
+        fi
+    fi
+}
+
+# Run a command with a spinner
+run_with_spinner() {
+    local message="$1"
+    shift
+
+    start_spinner "$message"
+
+    local exit_code=0
+    "$@" >/dev/null 2>&1 || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        stop_spinner 0 "$message"
+    else
+        stop_spinner 1 "$message"
+        return $exit_code
+    fi
+}
+
+# Cleanup spinner on script exit
+cleanup_spinner() {
+    if [[ -n "${SPINNER_PID:-}" ]] && kill -0 "${SPINNER_PID}" 2>/dev/null; then
+        kill "${SPINNER_PID}" 2>/dev/null
+        wait "${SPINNER_PID}" 2>/dev/null || true
+        printf "\r\033[K"
+    fi
+}
+trap cleanup_spinner EXIT
+
+# =============================================================================
+# Build Functions
+# =============================================================================
+
+cleanup_output_directory() {
+    if [[ -d "${OUTPUT_DIR_PATH}" ]]; then
+        rm -rf "${OUTPUT_DIR_PATH}"
+        echo -e "${GREEN}✓${RESET} Cleaned output directory"
+    fi
+}
+
+generate_sdk() {
+    log_step "Generating SDK from OpenAPI specification"
+    log_info "Source: ${OPENAPI_FILE}"
+    log_info "Version: ${VERSION}"
+
+    # Ensure paths are absolute
+    local openapi_abs_path="${PWD}/${OPENAPI_FILE}"
+    local output_abs_path="${OUTPUT_DIR_PATH}"
+
+    # Validate OpenAPI file exists
+    if [[ ! -f "${openapi_abs_path}" ]]; then
+        log_error "OpenAPI file not found: ${openapi_abs_path}"
+        # Try alternate extension
+        openapi_abs_path="${PWD}/openAPI/openApiSpecBD.json"
+        if [[ ! -f "${openapi_abs_path}" ]]; then
+            log_error "Also tried: ${openapi_abs_path}"
+            exit 1
+        fi
+        log_info "Using: ${openapi_abs_path}"
+    fi
+
+    # Create output directory
+    mkdir -p "${output_abs_path}"
+
+    log_info "Running OpenAPI generator..."
+
+    docker run --rm \
+        -v "${openapi_abs_path}:/local/openapi.yml" \
+        -v "${output_abs_path}:/temp/output" \
+        "${OPENAPI_GENERATOR_IMAGE}" generate \
+        -i "/local/openapi.yml" \
+        -g typescript-fetch \
+        --skip-validate-spec \
+        -o "/temp/output" \
+        --additional-properties="npmName=${PACKAGE_NAME},npmVersion=${VERSION},useSingleRequestParameter=true,modelNameSuffix=Payload,withoutRuntimeChecks=true,modelPropertyNaming=original" \
+        2>&1 | tee /tmp/openapi-generator.log
+
+    local exit_code=${PIPESTATUS[0]}
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "SDK generation failed. Check /tmp/openapi-generator.log for details"
+        exit $exit_code
+    fi
+
+    log_success "SDK generated successfully"
+}
+
+configure_npmignore() {
+    echo ".npmrc*" > "${OUTPUT_DIR_PATH}/.npmignore"
+    echo -e "${GREEN}✓${RESET} Configured .npmignore"
+}
+
+configure_tsconfig() {
+    start_spinner "Configuring TypeScript compiler options..."
+
+    sed_inplace 's|"module": *"[^"]*"|"module": "esnext"|' "${OUTPUT_DIR_PATH}/tsconfig.json"
+    sed_inplace 's|"moduleResolution": *"[^"]*"|"moduleResolution": "bundler"|' "${OUTPUT_DIR_PATH}/tsconfig.json"
+    sed_inplace 's|"target": *"[^"]*"|"target": "es2020"|' "${OUTPUT_DIR_PATH}/tsconfig.json"
+
+    stop_spinner 0 "TypeScript configuration updated"
+}
+
+configure_package_json() {
+    log_step "Configuring package.json"
+
+    start_spinner "Setting package metadata..."
+
+    # Set sideEffects
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" sideEffects=false
+    sed_inplace 's|"sideEffects": "false"|"sideEffects": false|' "${OUTPUT_DIR_PATH}/package.json"
+
+    # Add keywords
+    for keyword in "${KEYWORDS[@]}"; do
+        npm pkg set --prefix "${OUTPUT_DIR_PATH}" "keywords[]=${keyword}"
+    done
+
+    # Remove unnecessary scripts
+    npm pkg delete --prefix "${OUTPUT_DIR_PATH}" scripts.prepare 2>/dev/null || true
+    npm pkg delete --prefix "${OUTPUT_DIR_PATH}" scripts.build 2>/dev/null || true
+    npm pkg delete --prefix "${OUTPUT_DIR_PATH}" typings 2>/dev/null || true
+
+    # Set entry points
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" main="./dist/index.js"
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" module="./dist/index.mjs"
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" types="./dist/index.d.ts"
+
+    # Set engine requirements
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" engines.node="${NODE_VERSION_MIN}" >/dev/null
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" engines.npm="${NPM_VERSION_MIN}" >/dev/null
+
+    # Configure files to include in package
+    for file in "${PACKAGE_FILES[@]}"; do
+        npm pkg set --prefix "${OUTPUT_DIR_PATH}" files[]="${file}"
+    done
+
+    # Set license
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" license="MIT"
+
+    # Set repository url
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" repository.url="git+${REPOSITORY_URL}"
+
+    # RUN package fix
+    npm pkg fix --prefix "${OUTPUT_DIR_PATH}"
+
+    stop_spinner 0 "Package metadata configured"
+}
+
+configure_exports() {
+    start_spinner "Configuring module exports..."
+
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" "exports[.].import.types=./dist/index.d.mts"
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" "exports[.].import.default=./dist/index.mjs"
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" "exports[.].require.types=./dist/index.d.ts"
+    npm pkg set --prefix "${OUTPUT_DIR_PATH}" "exports[.].require.default=./dist/index.js"
+
+    stop_spinner 0 "Module exports configured"
+}
+
+build_distribution() {
+    log_step "Building distribution files"
+
+    # Install build dependencies
+    npm uninstall --prefix "${OUTPUT_DIR_PATH}" typescript >/dev/null 2>&1 || true
+
+    start_spinner "Installing build dependencies..."
+    (
+        cd "${OUTPUT_DIR_PATH}"
+        npm_config_loglevel=error npm install --save-dev tsup typescript @swc/core --no-save >/dev/null 2>&1
+    )
+    stop_spinner 0 "Build dependencies installed"
+
+    # Run tsup build
+    start_spinner "Compiling TypeScript (CJS, ESM, DTS)..."
+    (
+        cd "${OUTPUT_DIR_PATH}"
+        npx --yes tsup src/index.ts --format cjs,esm --dts --silent >/dev/null 2>&1
+    )
+    stop_spinner 0 "TypeScript compiled successfully"
+}
+
+copy_static_files() {
+    if [[ -f "${LICENSE_SOURCE}" ]]; then
+        cp "${LICENSE_SOURCE}" "${OUTPUT_DIR_PATH}/"
+    else
+        log_warn "LICENSE file not found at ${LICENSE_SOURCE}"
+    fi
+
+    if [[ -f "${README_SOURCE}" ]]; then
+        cp "${README_SOURCE}" "${OUTPUT_DIR_PATH}/"
+    else
+        log_warn "README file not found at ${README_SOURCE}"
+    fi
+
+    echo -e "${GREEN}✓${RESET} Copied static files (LICENSE, README)"
+}
+
+process_readme_template() {
+    local readme_path="${OUTPUT_DIR_PATH}/README.md"
+
+    if [[ ! -f "${readme_path}" ]]; then
+        log_warn "README.md not found, skipping template substitutions"
+        return
+    fi
+
+    start_spinner "Processing README.md template..."
+
+    # Substitute package name placeholder
+    sed_inplace "s|{{NPM_PACKAGE_NAME}}|${PACKAGE_NAME}|g" "${readme_path}"
+
+    # Substitute version placeholder
+    sed_inplace "s|{{NPM_PACKAGE_VERSION}}|${VERSION}|g" "${readme_path}"
+
+    stop_spinner 0 "README.md template processed"
+}
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+main() {
+    setup_colors
+
+    echo ""
+    log_step "Blockdaemon DeFi SDK Build"
+    echo ""
+
+    # Pre-flight checks
+    check_dependencies
+    validate_environment
+
+    # Build pipeline
+    cleanup_output_directory
+    generate_sdk
+    configure_npmignore
+    configure_tsconfig
+    configure_package_json
+    build_distribution
+    configure_exports
+    copy_static_files
+    process_readme_template
+
+    echo ""
+    log_success "Build completed successfully!"
+    log_info "Output: ${OUTPUT_DIR_PATH}"
+    echo ""
+}
+
+main "$@"

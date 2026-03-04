@@ -1,0 +1,8 @@
+{
+    "version": "0.1.0",
+    "name": "@blockdaemon/defi-api-sdk-gen",
+    "private": true,
+    "scripts": {
+        "build": "VERSION=0.0.0 ./scripts/build-defi-sdk"
+    }
+}
