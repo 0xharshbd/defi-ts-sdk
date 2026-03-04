@@ -248,6 +248,7 @@ generate_sdk() {
     log_info "Running OpenAPI generator..."
 
     docker run --rm \
+        --user "$(id -u):$(id -g)" \
         -v "${openapi_abs_path}:/local/openapi.yml" \
         -v "${output_abs_path}:/temp/output" \
         "${OPENAPI_GENERATOR_IMAGE}" generate \
