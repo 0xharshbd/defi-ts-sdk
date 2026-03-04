@@ -49,6 +49,10 @@ jobs:
 
       - name: Publish to npm
         working-directory: dist
-        run: npm publish --tag ${{ steps.version.outputs.dist_tag }} --access public
+        run: |
+          echo "version=${{ steps.version.outputs.version }}"
+          echo "dist_tag=${{ steps.version.outputs.dist_tag }}"
+
+          npm publish --tag ${{ steps.version.outputs.dist_tag }} --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
