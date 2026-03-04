@@ -365,12 +365,16 @@ build_distribution() {
 copy_static_files() {
     if [[ -f "${LICENSE_SOURCE}" ]]; then
         cp "${LICENSE_SOURCE}" "${OUTPUT_DIR_PATH}/"
+        # remove .template from the file name
+        mv "${OUTPUT_DIR_PATH}/LICENSE.template" "${OUTPUT_DIR_PATH}/LICENSE"
     else
         log_warn "LICENSE file not found at ${LICENSE_SOURCE}"
     fi
 
     if [[ -f "${README_SOURCE}" ]]; then
         cp "${README_SOURCE}" "${OUTPUT_DIR_PATH}/"
+        # remove .template from the file name
+        mv "${OUTPUT_DIR_PATH}/README.template.md" "${OUTPUT_DIR_PATH}/README.md"
     else
         log_warn "README file not found at ${README_SOURCE}"
     fi
