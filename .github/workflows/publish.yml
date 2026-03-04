@@ -1,0 +1,54 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Determine npm dist-tag from version string
+          if [[ "$VERSION" == *"-rc"* ]] || [[ "$VERSION" == *"-rc."* ]]; then
+            echo "dist_tag=rc" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" == *"-beta"* ]] || [[ "$VERSION" == *"-beta."* ]]; then
+            echo "dist_tag=beta" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" == *"-alpha"* ]] || [[ "$VERSION" == *"-alpha."* ]]; then
+            echo "dist_tag=alpha" >> $GITHUB_OUTPUT
+          else
+            echo "dist_tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Debug
+        run: |
+          echo "version=${{ steps.version.outputs.version }}"
+          echo "dist_tag=${{ steps.version.outputs.dist_tag }}"
+
+      - name: Build SDK
+        run: VERSION=${{ steps.version.outputs.version }} ./scripts/build-defi-sdk
+
+      - name: Publish to npm
+        working-directory: dist
+        run: npm publish --tag ${{ steps.version.outputs.dist_tag }} --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

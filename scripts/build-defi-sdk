@@ -14,8 +14,8 @@ readonly OPENAPI_GENERATOR_IMAGE="openapitools/openapi-generator-cli"
 readonly PACKAGE_NAME="@blockdaemon/defi-api-sdk"
 readonly OUTPUT_DIR_NAME="dist"
 readonly OUTPUT_DIR_PATH="${PWD}/${OUTPUT_DIR_NAME}"
-readonly LICENSE_SOURCE="${PWD}/openAPI/LICENSE"
-readonly README_SOURCE="${PWD}/openAPI/README.md"
+readonly LICENSE_SOURCE="${PWD}/templates/LICENSE.template"
+readonly README_SOURCE="${PWD}/templates/README.template"
 
 readonly KEYWORDS=("blockdaemon" "defi" "sdk" "typescript" "client" "web3" "blockchain" "expand")
 readonly PACKAGE_FILES=("dist" "README.md" "package.json" "LICENSE")
@@ -257,9 +257,9 @@ generate_sdk() {
         --skip-validate-spec \
         -o "/temp/output" \
         --additional-properties="npmName=${PACKAGE_NAME},npmVersion=${VERSION},useSingleRequestParameter=true,modelNameSuffix=Payload,withoutRuntimeChecks=true,modelPropertyNaming=original" \
-        2>&1 | tee /tmp/openapi-generator.log
+        > /tmp/openapi-generator.log 2>&1
 
-    local exit_code=${PIPESTATUS[0]}
+    local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
         log_error "SDK generation failed. Check /tmp/openapi-generator.log for details"
